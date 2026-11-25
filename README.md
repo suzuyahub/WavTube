@@ -1,4 +1,4 @@
-# WaveTube
+# WavTube
 
 WavTube.exe - 説明書
 
