@@ -78,7 +78,7 @@ if __name__ == '__main__':
 
         print("--- C Major スケールのテスト ---")
         bpm, key = analyze_audio_full(test_c_major_path)
-        print(f"検出されたBPM: {bpm}, 検出されたキー: {key}") 
+        print(f"検出されたBPM: {bpm}, 検出されたキー: {key}")
         
         notes_a_minor = [librosa.note_to_hz('A4'), librosa.note_to_hz('B4'), librosa.note_to_hz('C5'),
                          librosa.note_to_hz('D5'), librosa.note_to_hz('E5'), librosa.note_to_hz('F5'),
@@ -92,7 +92,7 @@ if __name__ == '__main__':
 
         print("\n--- A Minor スケールのテスト ---")
         bpm, key = analyze_audio_full(test_a_minor_path)
-        print(f"検出されたBPM: {bpm}, 検出されたキー: {key}") 
+        print(f"検出されたBPM: {bpm}, 検出されたキー: {key}")
 
     except Exception as e:
         print(f"\nテスト中にエラーが発生しました: {e}")

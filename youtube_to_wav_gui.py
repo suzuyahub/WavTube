@@ -3,12 +3,25 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from yt_dlp import YoutubeDL
 import tempfile
 import re
 import shutil
 import webbrowser
 import subprocess
+
+import app_version
+import updater
+
+# --- 内蔵アップデート対応 ---------------------------------------------
+# アプリ内アップデートで取得した新しい yt-dlp があれば、import する「前」に最優先で読み込む。
+# 更新版が壊れていて import に失敗した場合は、自動で同梱版へ戻す。
+updater.setup_runtime_path()      # 同梱の deno.exe (YouTube 用 JS ランタイム) を PATH へ
+updater.activate_external_libs()
+try:
+    from yt_dlp import YoutubeDL
+except Exception:
+    updater.quarantine_external_libs()
+    from yt_dlp import YoutubeDL
 
 from audio_analyzer import analyze_audio_full 
 
@@ -87,7 +100,7 @@ def set_initial_download_directory():
     if saved_path:
         download_directory = saved_path
     else:
-        # 設定がない場合はデフォルトのダウンロードフォルダ
+        # 設定がない場合はデフォルトのダウンロードフォルダ (規定は設定済み)
         default_download_path = os.path.expanduser('~/Downloads')
         if not os.path.exists(default_download_path):
             default_download_path = os.path.expanduser('~')
@@ -106,7 +119,7 @@ def select_download_directory():
     if new_directory:
         download_directory = new_directory
         download_dir_label.config(text=f"保存先: {download_directory}")
-        # 変更されたら即座に保存
+        # 変更されたら最優先で保存
         save_config(download_directory)
 
 def progress_hook(d):
@@ -121,11 +134,14 @@ def progress_hook(d):
         status_label.config(text="変換中...")
 
 def download_audio(url):
+    global active_downloads
     tmpdir = None
     try:
         tmpdir = tempfile.mkdtemp()
-        ffmpeg_path = resource_path("ffmpeg.exe")
-        ffprobe_path = resource_path("ffprobe.exe")
+        ffmpeg_path = updater.find_binary("ffmpeg.exe")
+        ffprobe_path = updater.find_binary("ffprobe.exe")
+        if not ffmpeg_path or not ffprobe_path:
+            raise Exception("ffmpeg.exe / ffprobe.exe が見つかりません。\nWavTube をインストールし直してください。")
         output_format = output_format_var.get()
         
         temp_audio_file_ext = 'wav'
@@ -206,8 +222,14 @@ def download_audio(url):
         progress_bar['value'] = 0
         if tmpdir and os.path.exists(tmpdir):
             shutil.rmtree(tmpdir)
+        with _state_lock:
+            active_downloads -= 1
 
 def start_download():
+    global active_downloads
+    if update_busy.is_set():
+        messagebox.showinfo("アップデート中", "アップデート中です。完了してからダウンロードしてください。")
+        return
     url = url_entry.get()
     if not url.strip():
         messagebox.showwarning("入力エラー", "YouTubeのURLを入力してください。")
@@ -219,6 +241,8 @@ def start_download():
     # ダウンロード開始時にも現在のディレクトリ設定を念のため保存
     save_config(download_directory)
     
+    with _state_lock:
+        active_downloads += 1
     threading.Thread(target=download_audio, args=(url,), daemon=True).start()
 
 def paste_url():
@@ -230,12 +254,137 @@ def paste_url():
         messagebox.showwarning("エラー", "クリップボードにテキストがありません。")
 
 def open_instagram_link(event):
-    webbrowser.open_new("https://instagram.com/suzuya_ins")
+    webbrowser.open_new("https://instagram.com/suzuya_ins") # 製作者
+
+# --- アップデート機能 (旧「WavTube更新ツール」を本体へ統合) ---
+_state_lock = threading.Lock()
+active_downloads = 0
+update_busy = threading.Event()
+pending_update = None
+update_status_label = None
+update_version_label = None
+update_button = None
+
+def refresh_version_label():
+    ver = updater.get_current_versions().get("yt-dlp") or "不明"
+    js = "検出" if updater.find_js_runtime() else "未検出 (一部の形式が取得できない場合があります)"
+    update_version_label.config(text=f"yt-dlp: {ver}   /   Deno(JSランタイム): {js}")
+
+def set_update_text(text):
+    update_status_label.config(text=text)
+
+def start_update_check(silent):
+    if update_busy.is_set():
+        return
+    update_busy.set()
+    update_button.config(state="disabled")
+    set_update_text("更新を確認中...")
+
+    def worker():
+        try:
+            result = updater.check_for_updates()
+            root.after(0, on_check_done, result, silent)
+        except Exception as e:
+            root.after(0, on_check_failed, e, silent)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+def on_check_failed(err, silent):
+    update_busy.clear()
+    update_button.config(state="normal")
+    set_update_text("更新を確認できませんでした (オフライン?)")
+    if not silent:
+        messagebox.showerror("更新確認エラー", f"更新の確認に失敗しました。\n{err}")
+
+def on_check_done(result, silent):
+    global pending_update
+    update_busy.clear()
+    update_button.config(state="normal")
+    if not result["outdated"]:
+        pending_update = None
+        update_button.config(text="更新を確認")
+        set_update_text("最新の状態です")
+        if not silent:
+            messagebox.showinfo("アップデート", "yt-dlp は最新の状態です。")
+        return
+    pending_update = result
+    cur = result["current"].get("yt-dlp") or "不明"
+    new = result["latest"]["yt-dlp"]["version"]
+    update_button.config(text="今すぐ更新")
+    set_update_text(f"新しいバージョンがあります: {cur} → {new}")
+    if not silent:
+        confirm_and_apply()
+
+def on_update_button():
+    if update_busy.is_set():
+        return
+    if pending_update:
+        confirm_and_apply()
+    else:
+        start_update_check(silent=False)
+
+def confirm_and_apply():
+    if active_downloads > 0:
+        messagebox.showwarning("ダウンロード中", "ダウンロード中はアップデートできません。完了後にもう一度お試しください。")
+        return
+    if messagebox.askyesno("アップデート", "yt-dlp を最新版に更新します。よろしいですか？\n（数十秒かかる場合があります）"):
+        start_apply_update(pending_update)
+
+def start_apply_update(result):
+    update_busy.set()
+    update_button.config(state="disabled")
+    progress_bar['value'] = 0
+
+    def worker():
+        try:
+            updater.apply_updates(result, progress=lambda p, msg: root.after(0, on_update_progress, p, msg))
+            root.after(0, on_update_done)
+        except Exception as e:
+            root.after(0, on_update_failed, e)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+def on_update_progress(percent, msg):
+    progress_bar['value'] = percent
+    set_update_text(msg)
+    status_label.config(text="アップデート中...")
+
+def on_update_failed(err):
+    update_busy.clear()
+    update_button.config(state="normal")
+    progress_bar['value'] = 0
+    status_label.config(text="待機中")
+    set_update_text("アップデートに失敗しました")
+    messagebox.showerror("アップデート失敗", f"更新に失敗したため、元の状態のままです。\n{err}")
+
+def on_update_done():
+    global pending_update
+    update_busy.clear()
+    pending_update = None
+    update_button.config(state="normal", text="更新を確認")
+    progress_bar['value'] = 0
+    status_label.config(text="待機中")
+    set_update_text("更新完了 (再起動すると反映されます)")
+    if messagebox.askyesno("アップデート完了", "更新が完了しました。\n再起動すると新しいバージョンが使われます。\n今すぐ再起動しますか？"):
+        restart_app()
+
+def restart_app():
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable] + sys.argv[1:]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        subprocess.Popen(cmd, env=env)
+    except Exception as e:
+        messagebox.showerror("再起動エラー", f"再起動に失敗しました。手動で起動し直してください。\n{e}")
+        return
+    root.destroy()
 
 # --- UIメイン ---
 root = tk.Tk()
-root.title("WavTube mp3+")
-root.geometry("550x380")
+root.title(f"WavTube mp3+  v{app_version.APP_VERSION}")
+root.geometry("550x470")
 root.resizable(False, False)
 
 try:
@@ -295,7 +444,20 @@ progress_bar = ttk.Progressbar(main_frame, length=400, mode='determinate')
 progress_bar.pack(pady=(0, 5), fill=tk.X)
 
 status_label = ttk.Label(main_frame, text="待機中")
-status_label.pack(pady=(0, 15))
+status_label.pack(pady=(0, 10))
+
+update_frame = ttk.LabelFrame(main_frame, text="アップデート", padding="10 5 10 8")
+update_frame.pack(fill=tk.X)
+
+update_version_label = ttk.Label(update_frame, text="yt-dlp: ...", wraplength=330, justify=tk.LEFT)
+update_version_label.grid(row=0, column=0, sticky="w")
+
+update_status_label = ttk.Label(update_frame, text="", wraplength=330, justify=tk.LEFT, foreground="gray")
+update_status_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+update_button = ttk.Button(update_frame, text="更新を確認", command=on_update_button)
+update_button.grid(row=0, column=1, rowspan=2, padx=(10, 0), sticky="e")
+update_frame.columnconfigure(0, weight=1)
 
 contact_frame = ttk.Frame(root, padding="10 0 10 10")
 contact_frame.pack(fill=tk.X, side=tk.BOTTOM)
@@ -310,5 +472,7 @@ ttk.Label(contact_frame, text=" まで").pack(side=tk.LEFT)
 
 # 起動時に保存されたパスを復元
 set_initial_download_directory()
+refresh_version_label()
+root.after(1500, lambda: start_update_check(silent=True))
 
 root.mainloop()
