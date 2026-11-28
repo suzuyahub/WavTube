@@ -22,7 +22,7 @@ WavTube.exe - 説明書
 
 WavTube.exe ファイルを実行します。
 
-リンクの入力 :
+・リンクの入力 :
 
 「YouTubeのURLを入力:」の下にある入力欄に、WAV形式で保存したいYouTube動画のURLを貼り付けます
 
