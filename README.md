@@ -18,7 +18,7 @@ WavTube.exe - 説明書
 
 ◆ 使い方 ◆
 
-起動 :
+・起動 :
 
 WavTube.exe ファイルを実行します。
 
